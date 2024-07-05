@@ -1,0 +1,244 @@
+--A. Customer nodes exploration 
+--1. How many unique nodes are there on the Data Bank system?
+select
+	count(distinct(node_id)) as num_node
+from data_bank.customer_nodes
+;
+--2. What is the number of nodes per region?
+select
+	r.region_name,
+	count(c.node_id) as node_count
+from data_bank.customer_nodes c
+join data_bank.regions r
+	on c.region_id = r.region_id
+group by r.region_name
+;
+--3. How many customers are allocated to each region?
+select
+	region_id,
+    count(distinct customer_id) as cust_count
+from data_bank.customer_nodes
+group by region_id
+order by region_id
+;
+--4. How many days on average are customers reallocated to a different node?
+select round(avg(date_part('day', end_date::timestamp - start_date::timestamp))) as avg_node_reallocated_days
+from data_bank.customer_nodes
+where end_date != '9999-12-31'
+;
+--5. What is the median, 80th and 95th percentile for this same reallocation days metric for each region?
+with reallocation_days_cte as (
+select
+	r.region_name,
+    date_part('day', c.end_date::timestamp - c.start_date::timestamp) as reallocation_days
+from data_bank.customer_nodes c
+join data_bank.regions r
+	using (region_id)
+where c.end_date != '9999-12-31'
+)
+select 
+	region_name,
+	percentile_cont(0.5) within group (order by reallocation_days) as median,
+  percentile_cont(0.8) within group (order by reallocation_days) as eightieth_percentile,
+  percentile_cont(0.95) within group (order by reallocation_days) as ninetieth_percentile
+from reallocation_days_cte
+group by region_name
+;
+
+--B. Customer transactions
+--1. What is the unique count and total amount for each transaction type?
+select
+	distinct txn_type,
+  count(customer_id) as unique_count,
+  sum(txn_amount) as total_amount
+from data_bank.customer_transactions
+group by txn_type
+;
+--2. What is the average total historical deposit counts and amounts for all customers?
+select
+	txn_type,
+  round(count(txn_type)/count(distinct customer_id)) as txn_count,
+  round(avg(txn_amount)) as avg_amount
+from data_bank.customer_transactions
+where txn_type = 'deposit'
+group by txn_type
+;
+--3. For each month - how many Data Bank customers make more than 1 deposit and either 1 purchase or 1 withdrawal in a single month?
+with cte as (
+	select
+		customer_id,
+		extract('month' from txn_date) as months,
+			sum(case when txn_type = 'deposit' then 0 else 1 end) as deposit_count,
+			sum(case when txn_type = 'purchase' then 0 else 1 end) as purchase_count,
+			sum(case when txn_type = 'withdrawal' then 1 else 0 end) as withdrawal_count
+	from data_bank.customer_transactions
+	group by customer_id, months
+)
+select 
+	months,
+    count(distinct customer_id) as total_customers
+from cte 
+where deposit_count > 1 
+	and (purchase_count >= 1 or withdrawal_count >= 1)
+group by months
+order by months
+;
+--4. What is the closing balance for each customer at the end of the month?
+with monthly_balance as (
+	select
+		customer_id,
+		date_trunc('month', txn_date) + interval '1 month - 1 day' as closing_month,
+		sum(case when txn_type != 'deposit' then -txn_amount else txn_amount end) as transaction_balance
+	from data_bank.customer_transactions
+	group by customer_id, closing_month
+),
+monthend_series as (
+  select
+  	distinct customer_id,
+  	('2020-01-31'::date + generate_series(0,3) * interval '1 month') as ending_month
+  from data_bank.customer_transactions
+),
+monthly_change as (
+	select 
+		s.ending_month,
+		s.customer_id,
+		sum(b.transaction_balance) over (partition by s.customer_id, s.ending_month 
+																			order by s.ending_month) as total_monthly_change,
+		sum(b.transaction_balance) over (partition by s.customer_id 
+																			order by s.ending_month 
+																			rows between unbounded preceding and current row) as ending_balance
+	from monthend_series s
+	left join monthly_balance b
+		on s.ending_month = b.closing_month
+		and s.customer_id = b.customer_id
+)
+select 
+	customer_id,
+  ending_month,
+  coalesce(total_monthly_change, 0) as total_monthly_change,
+  min(ending_balance) as ending_balance
+from monthly_change
+group by 1,2,3
+order by 1,2
+;
+--5. What is the percentage of customers who increase their closing balance by more than 5%?
+create temp table customer_monthly_balances as (
+	with monthly_balance as (
+		select
+			customer_id,
+    		date_trunc('month', txn_date) + interval '1 month - 1 day' as closing_month,
+    		sum(case when txn_type = 'purchase' or txn_type='withdrawal' then -txn_amount else txn_amount end) as transaction_balance
+		from data_bank.customer_transactions
+		group by customer_id, closing_month
+	),
+	monthend_series as (
+  		select
+  			distinct customer_id,
+  			('2020-01-31'::date + generate_series(0,3) * interval '1 month') as ending_month
+  		from data_bank.customer_transactions
+	),
+	monthly_change as (
+		select 
+			s.ending_month,
+    		s.customer_id,
+    		sum(b.transaction_balance) over (partition by s.customer_id, s.ending_month order by s.ending_month) as total_monthly_change,
+    		sum(b.transaction_balance) over (partition by s.customer_id order by s.ending_month rows between unbounded preceding and current row) as ending_balance
+		from monthend_series s
+		left join monthly_balance b
+			on s.ending_month = b.closing_month
+    	and s.customer_id = b.customer_id
+	)
+	select 
+		customer_id,
+    ending_month,
+    coalesce(total_monthly_change, 0) as total_monthly_change,
+    min(ending_balance) as ending_balance
+	from monthly_change
+	group by 1,2,3
+	order by 1,2)
+;
+create temp table ranked_monthly_balances as (
+  select 
+  	customer_id,
+  	ending_month,
+  	ending_balance,
+  	row_number() over (partition by customer_id order by ending_month) as sequence 
+  from customer_monthly_balances)
+;
+with following_month as (
+	select	
+		customer_id,
+		ending_month,
+		ending_balance,
+		lead(ending_balance) over (partition by customer_id order by ending_month) as following_balance
+	from ranked_monthly_balances
+),
+variance_cte as (
+	select
+		customer_id,
+		ending_month,
+		round(100.0*(following_balance - ending_balance)/ending_balance,1) as variance 
+	from following_month
+	where ending_month = '2020-01-31'
+		and following_balance::text not like '-%'
+	group by customer_id, ending_month, following_balance, ending_balance
+	having round(100.0*(following_balance - ending_balance)/ending_balance,1) > 5.0
+)
+select 
+	round(100.0* count(distinct customer_id )/ (select count(distinct customer_id) 
+                                       				from ranked_monthly_balances))as increase_5_perc
+from variance_cte
+;
+--C. Data allocation challenge
+--Running customer balance column that includes the impact each transaction.
+with transactions as (
+	select
+		customer_id,
+		extract('month' from txn_date) months,
+		txn_type,
+		txn_amount,
+		case when txn_type != 'deposit' then -txn_amount else txn_amount end actual_amount,
+		dense_rank() over(partition by customer_id order by txn_date) ranks
+	from data_bank.customer_transactions
+)
+select
+	customer_id,
+  months,
+  txn_type,
+  txn_amount,
+  sum(actual_amount) over (partition by customer_id order by ranks 
+                    		  rows between unbounded preceding and current row) balance
+from transactions
+order by 1, ranks
+;
+--minimum, average and maximum values of the running balance for each customer
+with transactions as (
+select
+	customer_id,
+    extract('month' from txn_date) months,
+    txn_type,
+    txn_amount,
+  	case when txn_type != 'deposit' then -txn_amount else txn_amount end actual_amount,
+    dense_rank() over(partition by customer_id order by txn_date) ranks
+from data_bank.customer_transactions
+), 
+raw_data as (
+select
+	customer_id,
+    months,
+    txn_type,
+    txn_amount,
+   	sum(actual_amount) over (partition by customer_id order by ranks 
+                            rows between unbounded preceding and current row) balance
+from transactions
+order by 1, ranks
+)
+select 
+	customer_id, 
+    count(txn_type) txn_completed,
+    min(balance) minimum_balance,
+    round(avg(balance),2) average_balance,
+    max(balance) maximum_balance
+from raw_data
+group by customer_id
+order by customer_id
