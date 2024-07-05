@@ -1,5 +1,6 @@
 # DannySQLChallenge-Week4
 Data Bank Case Study 4
+![188099339-63d94ce9-253e-4bc0-a7f9-a0a01f6918d9](https://github.com/khoatna065/DannySQLChallenge-Week4/assets/167158955/dd9ce4ad-c53c-4817-81e7-af177a117b77)
 ## Introduction
 There is a new innovation in the financial industry called Neo-Banks: new aged digital only banks without physical branches.
 
@@ -14,6 +15,7 @@ The management team at Data Bank want to increase their total customer base - bu
 This case study is all about calculating metrics, growth and helping the business analyse their data in a smart way to better forecast and plan for their future developments!
 
 ## Entity Relationship Diagrams
+![188096366-0c0cb3fa-f662-4773-a6f0-81263a99ab7b](https://github.com/khoatna065/DannySQLChallenge-Week4/assets/167158955/fda98fc4-fbe0-4579-ab77-82a89125b561)
 
 ## Case Study Questions
 
